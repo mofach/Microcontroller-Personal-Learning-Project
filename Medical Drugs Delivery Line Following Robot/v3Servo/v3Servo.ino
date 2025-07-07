@@ -1,7 +1,8 @@
 #include <WiFi.h>
 #include <WebServer.h>
+#include <ESP32Servo.h>
 
-// SSID dan password WiFi Access Point
+// WiFi AP
 const char* ssid = "MobilRC";
 const char* password = "12345678";
 
@@ -22,9 +23,17 @@ const char* password = "12345678";
 // Sensor buzzer
 #define BUZZER 2
 
+// Pin servo
+#define SERVO_ENGSEL 16
+#define SERVO_KUNCI 17
+
 WebServer server(80);
 bool blokirMaju = false;
 int kecepatanMotor = 200;  // Default speed (0-255)
+
+Servo engsel, kunci;
+bool bagasiTerbuka = false;
+bool bagasiTerkunci = true;
 
 // Fungsi kendali motor
 void stopMotor() {
@@ -63,7 +72,6 @@ void kiri() {
   digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
   ledcWrite(ENA, kecepatanMotor);
   ledcWrite(ENB, kecepatanMotor);
-  blokirMaju = false;
 }
 
 // Baca jarak ultrasonik
@@ -75,7 +83,7 @@ long bacaJarak() {
   return durasi * 0.034 / 2;
 }
 
-// Halaman Web UI dengan slider kecepatan
+// Halaman Web UI dengan slider kecepatan dan kontrol bagasi
 String htmlPage = R"rawliteral(
 <!DOCTYPE html>
 <html>
@@ -165,6 +173,10 @@ String htmlPage = R"rawliteral(
       <button onmousedown="sendCommand('/mundur')" onmouseup="sendCommand('/stop')"
               ontouchstart="sendCommand('/mundur')" ontouchend="sendCommand('/stop')">MUNDUR</button>
     </div>
+
+    <h2>Kontrol Bagasi</h2>
+    <button onclick="sendCommand('/buka')">BUKA BAGASI</button>
+    <button onclick="sendCommand('/tutup')">TUTUP BAGASI</button>
   </div>
 
   <script>
@@ -194,6 +206,15 @@ void setup() {
   pinMode(TRIG, OUTPUT); pinMode(ECHO, INPUT);
   pinMode(BUZZER, OUTPUT); digitalWrite(BUZZER, LOW);
 
+  // Setup servo
+  engsel.attach(SERVO_ENGSEL);
+  engsel.write(180); // posisi tertutup
+  delay(1000);
+  
+  kunci.attach(SERVO_KUNCI);
+  kunci.write(180); // posisi terkunci
+  delay(1000);
+
   // PWM Motor
   ledcAttach(ENA, 1000, 8);
   ledcAttach(ENB, 1000, 8);
@@ -219,6 +240,16 @@ void setup() {
       server.send(400, "text/plain", "Missing speed value");
     }
   });
+  server.on("/buka", []() {
+    bukaBagasi();
+    server.sendHeader("Location", "/");
+    server.send(303);
+  });
+  server.on("/tutup", []() {
+    tutupBagasi();
+    server.sendHeader("Location", "/");
+    server.send(303);
+  });
 
   server.begin();
 }
@@ -237,4 +268,33 @@ void loop() {
   } else {
     digitalWrite(BUZZER, LOW);
   }
+}
+
+// Fungsi buka tutup bagasi
+void bukaBagasi() {
+  Serial.println("Membuka bagasi...");
+  kunci.attach(SERVO_KUNCI);
+  kunci.write(90);  // buka kunci
+  delay(2000); // Tunggu lebih lama
+
+  engsel.attach(SERVO_ENGSEL);
+  engsel.write(90);  // buka engsel
+  delay(2000); // Tunggu lebih lama
+
+  bagasiTerbuka = true;
+  bagasiTerkunci = false;
+}
+
+void tutupBagasi() {
+  Serial.println("Menutup bagasi...");
+  engsel.attach(SERVO_ENGSEL);
+  engsel.write(180);  // tutup engsel
+  delay(3000); // Tunggu lebih lama
+
+  kunci.attach(SERVO_KUNCI);
+  kunci.write(180);  // kunci
+  delay(2000); // Tunggu lebih lama
+
+  bagasiTerbuka = false;
+  bagasiTerkunci = true;
 }

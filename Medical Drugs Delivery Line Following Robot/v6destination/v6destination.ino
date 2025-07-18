@@ -1,205 +1,180 @@
 #include <WiFi.h>
 #include <WebServer.h>
 
-// =====================
-// WIFI AP SETUP
-// =====================
-const char* ssid = "LineFollower-ESP32";
+#define IR_LEFT 34
+#define IR_MID 35
+#define IR_RIGHT 32
+
+#define ENA 13
+#define IN1 25
+#define IN2 26
+#define ENB 14
+#define IN3 27
+#define IN4 33
+
+#define BUZZER 2
+
+const char* ssid = "RC-Auto";
 const char* password = "12345678";
 WebServer server(80);
 
-// =====================
-// VARIABEL STATUS
-// =====================
-bool modeOtomatis = false;
-int tujuan = 0; // 0: tidak ada, 1: ruangan A, 2: ruangan B, 3: ruangan C
-int intersectionCount = 0;
-unsigned long lastIntersectionTime = 0;
-bool atIntersection = false;
+String mode = "OFF";  // OFF, A, B, C
+int simpangCount = 0;
+bool stopOnThis = false;
+bool persimpanganTerlewati = false;
 
-// =====================
-// KONFIGURASI PIN
-// =====================
-#define ENA 13
-#define IN1 32
-#define IN2 33
-#define ENB 14
-#define IN3 25
-#define IN4 26
-#define IR_LEFT   34
-#define IR_CENTER 39
-#define IR_RIGHT  35
-
-const bool HITAM = HIGH;
-const bool PUTIH = LOW;
-const int SPEED = 67;
-int lastDirection = 0;
-
-void setup() {
-  Serial.begin(115200);
-
-  // Motor
+void setupMotor() {
   pinMode(ENA, OUTPUT); pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
   pinMode(ENB, OUTPUT); pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
+}
 
-  // Sensor IR
-  pinMode(IR_LEFT, INPUT); pinMode(IR_CENTER, INPUT); pinMode(IR_RIGHT, INPUT);
+void setupIR() {
+  pinMode(IR_LEFT, INPUT);
+  pinMode(IR_MID, INPUT);
+  pinMode(IR_RIGHT, INPUT);
+}
 
-  // Buat WiFi AP
-  WiFi.softAP(ssid, password);
-  Serial.println("AP Started");
-  Serial.println(WiFi.softAPIP());
+void setupBuzzer() {
+  pinMode(BUZZER, OUTPUT);
+  digitalWrite(BUZZER, LOW);
+}
 
-  // =====================
-  // ROUTE HANDLER
-  // =====================
-  server.on("/", HTTP_GET, []() {
-    server.send(200, "text/html", halamanWeb());
-  });
+void buzzerBeep(int count) {
+  for (int i = 0; i < count; i++) {
+    digitalWrite(BUZZER, HIGH); delay(150);
+    digitalWrite(BUZZER, LOW); delay(150);
+  }
+}
 
-  server.on("/tujuanA", HTTP_GET, []() {
-    modeOtomatis = true;
-    tujuan = 1;
-    intersectionCount = 0;
-    server.send(200, "text/html", halamanWeb());
-    Serial.println("Mulai jalan ke Ruangan A");
-  });
+void buzzerOn() {
+  digitalWrite(BUZZER, HIGH);
+}
 
-  server.on("/tujuanB", HTTP_GET, []() {
-    modeOtomatis = true;
-    tujuan = 2;
-    intersectionCount = 0;
-    server.send(200, "text/html", halamanWeb());
-    Serial.println("Mulai jalan ke Ruangan B");
-  });
+void buzzerOff() {
+  digitalWrite(BUZZER, LOW);
+}
 
-  server.on("/tujuanC", HTTP_GET, []() {
-    modeOtomatis = true;
-    tujuan = 3;
-    intersectionCount = 0;
-    server.send(200, "text/html", halamanWeb());
-    Serial.println("Mulai jalan ke Ruangan C");
-  });
+void motorMaju() {
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+  analogWrite(ENA, 70); analogWrite(ENB, 70);
+}
 
-  server.on("/off", HTTP_GET, []() {
-    modeOtomatis = false;
-    tujuan = 0;
-    stop();
-    server.send(200, "text/html", halamanWeb());
-    Serial.println("Robot berhenti");
-  });
+void motorStop() {
+  digitalWrite(IN1, LOW); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, LOW);
+  analogWrite(ENA, 0); analogWrite(ENB, 0);
+}
 
+void motorBelokKanan() {
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);  digitalWrite(IN4, HIGH);
+  analogWrite(ENA, 70); analogWrite(ENB, 70);
+}
+
+void handleRoot() {
+  String html = "<html><head><title>RC Mode</title></head><body><h1>Pilih Mode Tujuan</h1>";
+  html += "<button onclick=\"location.href='/a'\">Ruang A</button> ";
+  html += "<button onclick=\"location.href='/b'\">Ruang B</button> ";
+  html += "<button onclick=\"location.href='/c'\">Ruang C</button> ";
+  html += "<button onclick=\"location.href='/off'\">OFF</button> ";
+  html += "<p>Mode Sekarang: <b>" + mode + "</b></p></body></html>";
+  server.send(200, "text/html", html);
+}
+
+void handleMode(String m) {
+  mode = m;
+  simpangCount = 0;
+  persimpanganTerlewati = false;
+  stopOnThis = false;
+  motorStop();
+  buzzerOff();
+  handleRoot();
+}
+
+void setupWebServer() {
+  server.on("/", handleRoot);
+  server.on("/a", [](){ handleMode("A"); });
+  server.on("/b", [](){ handleMode("B"); });
+  server.on("/c", [](){ handleMode("C"); });
+  server.on("/off", [](){ handleMode("OFF"); });
   server.begin();
 }
 
-void loop() {
+void setupWiFi() {
+  WiFi.softAP(ssid, password);
+  Serial.println("WiFi AP Ready: " + WiFi.softAPIP().toString());
+}
+
+bool isPersimpangan() {
+  return digitalRead(IR_LEFT) == LOW && digitalRead(IR_MID) == LOW && digitalRead(IR_RIGHT) == LOW;
+}
+
+void loopOtomatis() {
   server.handleClient();
 
-  // Alur utama robot
-  if (modeOtomatis && tujuan > 0) {
-    int kiri = digitalRead(IR_LEFT);
-    int tengah = digitalRead(IR_CENTER);
-    int kanan = digitalRead(IR_RIGHT);
+  if (mode == "OFF") {
+    motorStop();
+    buzzerOff();
+    return;
+  }
 
-    // Deteksi persimpangan (ketiga sensor hitam)
-    if (kiri == HITAM && tengah == HITAM && kanan == HITAM) {
-      if (!atIntersection && millis() - lastIntersectionTime > 1000) { // Debounce
-        atIntersection = true;
-        lastIntersectionTime = millis();
-        intersectionCount++;
-        Serial.print("Persimpangan ke-");
-        Serial.println(intersectionCount);
-        
-        // Logika belok sesuai tujuan
-        if ((tujuan == 1 && intersectionCount == 1) || 
-            (tujuan == 2 && intersectionCount == 2) ||
-            (tujuan == 3 && intersectionCount == 3)) {
-          Serial.println("Belok kanan di persimpangan ini!");
-          pivotKanan();
-          delay(1500);
-          maju();
-          delay(1500);
-          stop();
-          modeOtomatis = false; // Berhenti setelah sampai tujuan
-          tujuan = 0;
-          return;
-        }
-      }
-    } else {
-      atIntersection = false;
-      
-      // Line follower biasa
-      if (tengah == HITAM) {
-        if (kiri == PUTIH && kanan == PUTIH) {
-          maju(); lastDirection = 0;
-        } else if (kiri == HITAM) {
-          pivotKiri(); lastDirection = -1;
-        } else if (kanan == HITAM) {
-          pivotKanan(); lastDirection = 1;
-        }
+  if (isPersimpangan()) {
+    delay(200);  // debounce
+    if (!persimpanganTerlewati) {
+      simpangCount++;
+      persimpanganTerlewati = true;
+
+      if ((mode == "A" && simpangCount == 1) ||
+          (mode == "B" && simpangCount == 2) ||
+          (mode == "C" && simpangCount == 3)) {
+        stopOnThis = true;
+        buzzerOn();
       } else {
-        // Fallback cari garis
-        if (lastDirection == -1) pivotKiri();
-        else if (lastDirection == 1) pivotKanan();
-        else maju();
+        buzzerBeep(2);
       }
     }
+  } else {
+    persimpanganTerlewati = false;
+    buzzerOff();
   }
-  
-  delay(10);
+
+  if (stopOnThis) {
+    motorBelokKanan();
+    delay(600);  // belok kanan
+    motorStop();
+    return;
+  }
+
+  // Normal line following logic (IR tengah hitam = maju)
+  int L = digitalRead(IR_LEFT);
+  int M = digitalRead(IR_MID);
+  int R = digitalRead(IR_RIGHT);
+
+  if (M == LOW) {
+    motorMaju();
+  } else if (L == LOW) {
+    // belok kiri
+    digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH);
+    digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+  } else if (R == LOW) {
+    // belok kanan
+    digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+    digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH);
+  } else {
+    motorStop(); // semua putih
+  }
 }
 
-// =====================
-// FUNGSI MOTOR
-// =====================
-void maju() {
-  analogWrite(ENA, SPEED); analogWrite(ENB, SPEED);
-  digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH);
-  digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH);
+void setup() {
+  Serial.begin(115200);
+  setupMotor();
+  setupIR();
+  setupBuzzer();
+  setupWiFi();
+  setupWebServer();
 }
 
-void pivotKiri() {
-  analogWrite(ENA, SPEED); analogWrite(ENB, SPEED);
-  digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH);
-  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
-}
-
-void pivotKanan() {
-  analogWrite(ENA, SPEED); analogWrite(ENB, SPEED);
-  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
-  digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH);
-}
-
-void stop() {
-  analogWrite(ENA, 0); analogWrite(ENB, 0);
-  digitalWrite(IN1, LOW); digitalWrite(IN2, LOW);
-  digitalWrite(IN3, LOW); digitalWrite(IN4, LOW);
-}
-
-// =====================
-// HALAMAN HTML - Minimalis
-// =====================
-String halamanWeb() {
-  String html = "<!DOCTYPE html><html><head>";
-  html += "<title>Kontrol Robot</title>";
-  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-  html += "<style>";
-  html += "body { font-family: Arial, sans-serif; text-align: center; margin: 0; padding: 20px; }";
-  html += "h1 { color: #333; }";
-  html += ".btn { display: inline-block; padding: 15px 25px; font-size: 18px; cursor: pointer; ";
-  html += "text-align: center; text-decoration: none; outline: none; border: none; ";
-  html += "border-radius: 15px; margin: 10px; width: 150px; }";
-  html += ".btn-tujuan { background-color: #4CAF50; color: white; }";
-  html += ".btn-tujuan:active { background-color: #3e8e41; }";
-  html += ".btn-off { background-color: #f44336; color: white; }";
-  html += ".btn-off:active { background-color: #d32f2f; }";
-  html += "</style></head><body>";
-  html += "<h1>Kontrol Robot Line Follower</h1>";
-  html += "<a href='/tujuanA' class='btn btn-tujuan'>Ruangan A</a>";
-  html += "<a href='/tujuanB' class='btn btn-tujuan'>Ruangan B</a>";
-  html += "<a href='/tujuanC' class='btn btn-tujuan'>Ruangan C</a>";
-  html += "<br><br>";
-  html += "<a href='/off' class='btn btn-off'>STOP</a>";
-  html += "</body></html>";
-  return html;
+void loop() {
+  loopOtomatis();
 }
